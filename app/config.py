@@ -165,6 +165,20 @@ class Settings(BaseSettings):
 
     # ── Validators ─────────────────────────────────────────────────────────────
 
+    @field_validator("whatsapp_provider", mode="before")
+    @classmethod
+    def _coerce_empty_whatsapp_provider(cls, value: object) -> object:
+        """Treat an empty string as None for the optional WhatsApp provider.
+
+        ``.env.example`` ships with ``WHATSAPP_PROVIDER=`` (empty) as a
+        placeholder.  pydantic-settings passes ``""`` to the model, which
+        would fail enum validation.  This validator normalises it to ``None``
+        so the app boots cleanly without WhatsApp configured.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, value: str) -> str:

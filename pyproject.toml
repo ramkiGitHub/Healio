@@ -101,3 +101,36 @@ addopts = "--cov=app --cov-report=term-missing --cov-report=html"
 python_version = "3.11"
 strict = true
 ignore_missing_imports = true
+
+# ── uv config ─────────────────────────────────────────────────────────────────
+# PyTorch wheels are not on PyPI — they live on PyTorch's own wheel index.
+# extra-index-url tells uv to search this index in addition to PyPI so it can
+# find torch/torchvision wheels for both Linux (Docker/prod) and Windows (dev).
+#
+# Switch to https://download.pytorch.org/whl/cu124 for CUDA support.
+# ── uv config ─────────────────────────────────────────────────────────────────
+# PyTorch wheels are not on PyPI — they live on PyTorch's own wheel index.
+# required-environments: lock for both Windows (dev) and Linux (Docker/prod).
+# [[tool.uv.index]]: register the PyTorch CPU wheel index explicitly.
+# [tool.uv.sources]: pin torch to that index so PyPI is never searched for it.
+#
+# Switch url to https://download.pytorch.org/whl/cu124 for CUDA 12.4 support.
+[tool.uv]
+# Pin the managed Python version.
+# torch==2.5.1+cpu has no Windows wheel for Python 3.13; pin to 3.12 so
+# `uv sync` always creates a cp312 venv on any platform.
+python-version = "3.12"
+required-environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu" },
+]
