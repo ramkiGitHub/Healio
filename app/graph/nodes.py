@@ -49,9 +49,13 @@ from app.constants import (
     IntentType,
     SeverityLevel,
 )
-from app.exceptions import NodeExecutionError, RoutingError
+from app.exceptions import NodeExecutionError, PatientNotFoundError, RoutingError
 from app.graph.state import HealioState
 from app.logging_config import get_logger
+from app.nlp.biobert import get_biobert_extractor
+from app.nlp.severity import SeverityScorer
+from app.tools.alerts import HITLAlertTool
+from app.tools.ehr import get_ehr_tool
 
 log = get_logger(__name__)
 
@@ -114,16 +118,40 @@ def router_node(state: HealioState) -> dict:
 
     # ── Step 1: Rule-based emergency keyword check ─────────────────────────────
     # Check before calling the LLM — zero latency, catches obvious cases.
-    severity = _classify_severity_by_keywords(latest_message)
+    keyword_severity = _classify_severity_by_keywords(latest_message)
 
-    if severity == SeverityLevel.EMERGENCY:
+    if keyword_severity == SeverityLevel.EMERGENCY:
         log.info(
             "router_node_emergency_detected_by_keywords",
             session_id=state.get("session_id"),
         )
-        return {"intent": IntentType.EMERGENCY, "severity": SeverityLevel.EMERGENCY}
+        return {
+            "intent": IntentType.EMERGENCY,
+            "severity": SeverityLevel.EMERGENCY,
+            "biobert_entities": [],
+        }
 
-    # ── Step 2: LLM-based intent + severity classification ────────────────────
+    # ── Step 2: BioBERT medical NER (Phase 2) ─────────────────────────────────
+    # Extracts clinical entities (Sign_symptom, Disease_disorder, etc.) and
+    # enhances severity detection beyond simple keyword matching.
+    extractor = get_biobert_extractor()
+    entities = extractor.extract(latest_message)
+    biobert_severity = SeverityScorer().score_from_entities(entities)
+    entities_as_dicts = [e.to_dict() for e in entities]
+
+    if biobert_severity == SeverityLevel.EMERGENCY:
+        log.info(
+            "router_node_emergency_detected_by_biobert",
+            session_id=state.get("session_id"),
+            entities=[e.text for e in entities],
+        )
+        return {
+            "intent": IntentType.EMERGENCY,
+            "severity": SeverityLevel.EMERGENCY,
+            "biobert_entities": entities_as_dicts,
+        }
+
+    # ── Step 3: LLM-based intent + severity classification ────────────────────
     prompt = ROUTER_PROMPT_TEMPLATE.format(message=latest_message)
 
     try:
@@ -138,17 +166,22 @@ def router_node(state: HealioState) -> dict:
     # Parse the JSON response from the LLM
     intent, llm_severity = _parse_router_response(raw_content, state.get("session_id", ""))
 
-    # Use the stricter of: keyword-based severity vs LLM-based severity
-    final_severity = _max_severity(severity, llm_severity)
+    # Use the strictest of: keyword / BioBERT / LLM severity
+    final_severity = _max_severity(_max_severity(keyword_severity, biobert_severity), llm_severity)
 
     log.info(
         "router_node_complete",
         session_id=state.get("session_id"),
         intent=intent,
         severity=final_severity,
+        biobert_entities_count=len(entities_as_dicts),
     )
 
-    return {"intent": intent, "severity": final_severity}
+    return {
+        "intent": intent,
+        "severity": final_severity,
+        "biobert_entities": entities_as_dicts,
+    }
 
 
 # ── 2. Emergency Node ──────────────────────────────────────────────────────────
@@ -191,21 +224,26 @@ def emergency_node(state: HealioState) -> dict:
         message_preview=(latest_message or "")[:80],
     )
 
-    # PHASE 2 PLACEHOLDER: Call the HITL Alert Tool here.
-    # from app.tools.alerts import send_emergency_alert
-    # await send_emergency_alert(
-    #     patient_id=patient_id,
-    #     patient_name=patient_name,
-    #     message=latest_message,
-    #     session_id=session_id,
-    # )
-
-    # Log that alert would be sent (Phase 1 — tool not yet connected)
-    log.info(
-        "emergency_alert_placeholder",
-        session_id=session_id,
-        note="HITL alert tool will be wired in Phase 2 (app/tools/alerts.py)",
-    )
+    # ── HITL Alert: notify the on-call doctor via Telegram ───────────────────
+    # Send a structured alert to DOCTOR_CHAT_ID. If the alert fails (network
+    # issue, bad token etc.), we log a critical error but still send the
+    # patient-facing response — never leave a patient without a reply.
+    try:
+        HITLAlertTool().send_alert(
+            patient_id=patient_id,
+            patient_name=patient_name or "",
+            message=latest_message or "",
+            session_id=session_id,
+            severity="emergency",
+        )
+    except Exception as alert_exc:
+        # Critical: alert failed, but we continue to serve the patient
+        log.error(
+            "emergency_alert_failed",
+            session_id=session_id,
+            patient_id=patient_id,
+            error=str(alert_exc),
+        )
 
     # Compose the patient-facing emergency response
     greeting = f"{patient_name}, I" if patient_name else "I"
@@ -263,16 +301,18 @@ def profile_lookup_node(state: HealioState) -> dict:
         patient_id=patient_id,
     )
 
-    # PHASE 2 PLACEHOLDER: Replace with real EHR tool call.
-    # from app.tools.ehr import MockEHRTool
-    # tool = MockEHRTool()
-    # try:
-    #     profile = tool.lookup_patient(patient_id=patient_id)
-    # except PatientNotFoundError:
-    #     profile = {}
-
-    # Phase 1 stub: return an empty profile with a known-patient name for testing
-    profile = _mock_profile_lookup(patient_id)
+    # ── EHR tool: fetch patient profile from Mock EHR store ──────────────────
+    # Raises PatientNotFoundError for unknown IDs — caught here to keep
+    # the graph running (unknown patients get an empty profile).
+    try:
+        profile = get_ehr_tool().lookup_patient(patient_id=patient_id)
+    except PatientNotFoundError:
+        log.info(
+            "profile_lookup_no_record",
+            session_id=session_id,
+            patient_id=patient_id,
+        )
+        profile = {}
 
     updated_flags = {**state.get("flags", {}), "profile_loaded": True}
 

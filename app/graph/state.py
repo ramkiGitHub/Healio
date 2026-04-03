@@ -167,6 +167,12 @@ class HealioState(TypedDict):
     # ── Error surfacing ────────────────────────────────────────────────────────
     error_message: str | None
 
+    # ── BioBERT NER output (set each turn by RouterNode) ──────────────────────
+    # Each element is a dict with keys: text, label, score.
+    # Stored as plain dicts (not MedicalEntity dataclass) to remain
+    # JSON-serialisable for the SQLite LangGraph checkpointer.
+    biobert_entities: list[dict]
+
 
 def create_initial_state(session_id: str, patient_id: str, first_message: str) -> HealioState:
     """Create a fresh HealioState for the first turn of a new conversation.
@@ -198,6 +204,7 @@ def create_initial_state(session_id: str, patient_id: str, first_message: str) -
         session_id=session_id,
         patient_id=patient_id,
         messages=[HumanMessage(content=first_message)],
+        biobert_entities=[],
         patient_profile=PatientProfile(),
         intent=IntentType.UNKNOWN,
         severity=SeverityLevel.ROUTINE,
