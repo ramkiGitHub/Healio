@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Healio — Docker Compose (local development)
+#
+# Usage:
+#   docker compose up --build        # build image and start
+#   docker compose up -d             # start in background
+#   docker compose logs -f healio    # tail logs
+#   docker compose down              # stop and remove containers
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  healio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: healio-api
+    image: healio:latest
+
+    # Load all environment variables from .env file
+    env_file:
+      - .env
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      # Persist the SQLite database across container restarts
+      - healio-db:/app/data/db
+
+      # Hot-reload app code during development (remove in production)
+      - ./app:/app/app:ro
+      - ./data:/app/data:ro
+
+    # Always restart unless explicitly stopped
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+# Named volume for SQLite persistence
+volumes:
+  healio-db:
+    driver: local

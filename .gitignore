@@ -1,0 +1,67 @@
+# ──────────────────────────────────────────
+# Healio — .gitignore
+# ──────────────────────────────────────────
+
+# Environment secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+.python-version
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.xml
+
+# Type checking
+.mypy_cache/
+
+# Linting
+.ruff_cache/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*.DS_Store
+Thumbs.db
+
+# Docker
+*.log
+
+# SQLite database (generated at runtime)
+data/db/
+*.db
+*.sqlite3
+
+# HuggingFace model cache (large, downloaded at runtime)
+.cache/
+models/
+
+# LangGraph / LangChain cache
+.langchain.db
+
+# Distribution
+*.tar.gz
+*.zip

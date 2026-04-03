@@ -1,0 +1,103 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "healio"
+version = "0.1.0"
+description = "Healio — Conversational Health OS. AI-powered medical assistant for clinics."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+
+dependencies = [
+    # ── Web framework ──────────────────────────────────────────
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.32.1",
+
+    # ── Configuration & validation ─────────────────────────────
+    "pydantic==2.10.3",
+    "pydantic-settings==2.7.0",
+
+    # ── AI / LLM orchestration ─────────────────────────────────
+    "langchain==0.3.13",
+    "langchain-openai==0.3.0",
+    "langgraph==0.2.60",
+    "langsmith==0.2.6",
+
+    # ── OpenAI client ──────────────────────────────────────────
+    "openai==1.59.3",
+
+    # ── HuggingFace / NLP ──────────────────────────────────────
+    "transformers==4.47.1",
+    "torch==2.5.1",
+
+    # ── Telegram channel ──────────────────────────────────────
+    "python-telegram-bot==21.9",
+
+    # ── HTTP client (async) ────────────────────────────────────
+    "httpx==0.28.1",
+
+    # ── Retry logic ────────────────────────────────────────────
+    "tenacity==9.0.0",
+
+    # ── Structured logging ─────────────────────────────────────
+    "structlog==24.4.0",
+
+    # ── Database (SQLite + future PostgreSQL) ──────────────────
+    "aiosqlite==0.20.0",
+
+    # ── Utilities ─────────────────────────────────────────────
+    "python-dotenv==1.0.1",
+    "python-multipart==0.0.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.0",
+    "pytest-cov==6.0.0",
+    "httpx==0.28.1",       # async FastAPI test client
+
+    # Linting & formatting
+    "ruff==0.8.4",
+    "mypy==1.14.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# ── Ruff linting config ────────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = [
+    "B008",  # do not perform function calls in default arguments (FastAPI Depends pattern)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+# ── Pytest config ─────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=app --cov-report=term-missing --cov-report=html"
+
+# ── Mypy config ───────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true

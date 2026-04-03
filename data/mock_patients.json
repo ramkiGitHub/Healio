@@ -1,0 +1,57 @@
+[
+  {
+    "patient_id": "test_patient",
+    "name": "Ravi Kumar",
+    "age": 35,
+    "blood_group": "O+",
+    "conditions": ["Type 2 Diabetes", "Hypertension"],
+    "allergies": ["Penicillin"],
+    "medications": ["Metformin 500mg", "Amlodipine 5mg"],
+    "last_visit": "2026-03-15",
+    "clinic": "Healio Demo Clinic, Bengaluru"
+  },
+  {
+    "patient_id": "P001",
+    "name": "Anjali Sharma",
+    "age": 28,
+    "blood_group": "A+",
+    "conditions": ["Asthma"],
+    "allergies": ["Aspirin", "Ibuprofen"],
+    "medications": ["Salbutamol inhaler (as needed)"],
+    "last_visit": "2026-01-20",
+    "clinic": "Healio Demo Clinic, Bengaluru"
+  },
+  {
+    "patient_id": "P002",
+    "name": "Karthik Nair",
+    "age": 52,
+    "blood_group": "B+",
+    "conditions": ["Coronary Artery Disease", "Hypothyroidism"],
+    "allergies": [],
+    "medications": ["Aspirin 75mg", "Atorvastatin 20mg", "Levothyroxine 50mcg"],
+    "last_visit": "2026-02-28",
+    "clinic": "Healio Demo Clinic, Chennai"
+  },
+  {
+    "patient_id": "P003",
+    "name": "Priya Menon",
+    "age": 42,
+    "blood_group": "AB-",
+    "conditions": ["Rheumatoid Arthritis"],
+    "allergies": ["Sulfa drugs"],
+    "medications": ["Methotrexate 10mg (weekly)", "Folic Acid 5mg"],
+    "last_visit": "2026-03-01",
+    "clinic": "Healio Demo Clinic, Bengaluru"
+  },
+  {
+    "patient_id": "P004",
+    "name": "Suresh Reddy",
+    "age": 65,
+    "blood_group": "O-",
+    "conditions": ["Chronic Kidney Disease Stage 3", "Type 2 Diabetes", "Hypertension"],
+    "allergies": ["Contrast dye", "Penicillin"],
+    "medications": ["Insulin glargine 20 units", "Amlodipine 10mg", "Furosemide 40mg"],
+    "last_visit": "2026-03-22",
+    "clinic": "Healio Demo Clinic, Chennai"
+  }
+]
