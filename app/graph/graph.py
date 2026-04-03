@@ -302,3 +302,12 @@ def _extract_last_ai_message(final_state: dict) -> str:
         "I'm sorry, I wasn't able to process your message. "
         "Please try again or contact the clinic directly."
     )
+
+
+# ── LangGraph Cloud entry point ────────────────────────────────────────────────
+# LangGraph Cloud / LangGraph Studio resolve the graph by loading the Python
+# module and reading this attribute.  The lru_cache ensures it is built once.
+#
+# Referenced in langgraph.json:
+#   "graphs": { "healio": "./app/graph/graph.py:healio_graph" }
+healio_graph: CompiledStateGraph = _get_compiled_graph()

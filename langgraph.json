@@ -1,0 +1,22 @@
+{
+  "$schema": "https://langchain-ai.github.io/langgraph/schemas/langgraph-config.json",
+
+  "python_version": "3.12",
+
+  "dependencies": ["."],
+
+  "graphs": {
+    "healio": "./app/graph/graph.py:healio_graph"
+  },
+
+  "env": ".env",
+
+  "store": null,
+
+  "auth": null,
+
+  "http": {
+    "disable_assistants": false,
+    "disable_meta_endpoints": false
+  }
+}

@@ -1,11 +1,16 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Healio — Docker Compose (local development)
+# Healio — Docker Compose
+#
+# Profiles:
+#   (default)  Production-like local run — no hot-reload, named volume for DB
+#   dev        Development — mounts app/ and data/ for hot-reload (set below)
 #
 # Usage:
-#   docker compose up --build        # build image and start
-#   docker compose up -d             # start in background
-#   docker compose logs -f healio    # tail logs
-#   docker compose down              # stop and remove containers
+#   docker compose up --build          # build image and start
+#   docker compose up -d               # start in background
+#   docker compose logs -f healio      # tail logs
+#   docker compose down                # stop and remove containers
+#   docker compose down -v             # stop, remove containers AND volumes
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -13,11 +18,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Only build the final runtime stage (skips exporting builder layer)
       target: runtime
     container_name: healio-api
     image: healio:latest
 
-    # Load all environment variables from .env file
+    # All environment variables are loaded from .env
+    # Never commit real secrets — see .env.example
     env_file:
       - .env
 
@@ -25,24 +32,45 @@ services:
       - "8000:8000"
 
     volumes:
-      # Persist the SQLite database across container restarts
+      # Named volume: persists the SQLite database across container restarts
+      # and docker compose down (destroyed only by `docker compose down -v`)
       - healio-db:/app/data/db
 
-      # Hot-reload app code during development (remove in production)
-      - ./app:/app/app:ro
-      - ./data:/app/data:ro
+      # ── Development hot-reload (uncomment for local dev) ──────────────────
+      # Mounts local source as read-only so uvicorn --reload picks up changes.
+      # Remove these mounts in CI / production.
+      # - ./app:/app/app:ro
+      # - ./data:/app/data:ro
 
-    # Always restart unless explicitly stopped
+    # Restart policy: restart unless the operator explicitly stops the container
     restart: unless-stopped
 
+    # Resource limits: keep the container from starving the host during dev
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: "2G"
+        reservations:
+          cpus: "0.25"
+          memory: "256M"
+
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 20s
+
+    # Structured logging — keep last 50 MB, rotate at 10 MB
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 # Named volume for SQLite persistence
+# Lives at /var/lib/docker/volumes/healio_healio-db on Linux hosts
 volumes:
   healio-db:
     driver: local
