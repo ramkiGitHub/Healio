@@ -55,6 +55,7 @@ from app.logging_config import get_logger
 from app.nlp.biobert import get_biobert_extractor
 from app.nlp.severity import SeverityScorer
 from app.tools.alerts import HITLAlertTool
+from app.tools.calendar import get_calendar_tool
 from app.tools.ehr import get_ehr_tool
 
 log = get_logger(__name__)
@@ -362,6 +363,10 @@ def schedule_node(state: HealioState) -> dict:
 
     log.info("schedule_node_started", session_id=session_id)
 
+    # Fetch today's and tomorrow's available slots from the calendar tool
+    # so the LLM can quote real slot times instead of making them up.
+    calendar_context = _build_calendar_context()
+
     system_content = (
         "You are a helpful clinic appointment scheduling assistant for Healio. "
         "Help the patient book an appointment by collecting: "
@@ -370,9 +375,12 @@ def schedule_node(state: HealioState) -> dict:
         "Be concise — the patient is on a mobile messaging app. "
         f"The patient's name is: {patient_name or 'Unknown'}. "
         f"Today's date is: {datetime.now(UTC).strftime('%A, %B %d, %Y')}.\n\n"
-        "IMPORTANT: Available slots are Monday-Saturday, 9am-6pm. "
-        "Once you have all three pieces of information, summarise and confirm. "
-        "Do not book the appointment yourself — end with 'Appointment request received.'"
+        f"{calendar_context}\n\n"
+        "Once you have all three pieces of information (date, time, and reason), "
+        "summarise them and ask the patient to confirm. "
+        "When the patient confirms, end your reply with exactly: "
+        "'✅ Appointment request received.' "
+        "Do NOT book the appointment yourself — the clinic staff will call to confirm."
     )
 
     messages_for_llm = [
@@ -391,7 +399,15 @@ def schedule_node(state: HealioState) -> dict:
 
     log.info("schedule_node_complete", session_id=session_id)
 
-    return {"messages": [AIMessage(content=reply_text)]}
+    # Detect confirmation to mark appointment as received in state
+    appointment_ctx = dict(state.get("appointment_context") or {})
+    if "✅ Appointment request received" in reply_text or "Appointment request received" in reply_text:
+        appointment_ctx["booking_step"] = "received"
+
+    return {
+        "messages": [AIMessage(content=reply_text)],
+        "appointment_context": appointment_ctx,
+    }
 
 
 # ── 5. General Q&A Node ────────────────────────────────────────────────────────
@@ -408,16 +424,17 @@ def general_qa_node(state: HealioState) -> dict:
     It uses the full patient profile and conversation history to produce
     contextually relevant, empathetic responses.
 
-    Allergy flag checking (Phase 3) will be added here — if the patient
-    mentions a medication and they have a documented allergy to it, the
-    response will include a warning.
+    Runs an allergy conflict check: if the latest patient message mentions
+    a medication the patient is allergic to, a prominent warning is prepended
+    to the LLM system prompt and the ``allergy_flagged`` state flag is set.
 
     Args:
         state: Current HealioState. Reads ``messages``, ``patient_profile``,
                ``intent``, and ``flags``.
 
     Returns:
-        Partial state dict updating ``messages`` (AI reply appended).
+        Partial state dict updating ``messages`` (AI reply appended) and
+        ``flags`` (``allergy_flagged`` set if a conflict was detected).
 
     Raises:
         NodeExecutionError: If the LLM call fails after all retries.
@@ -431,13 +448,39 @@ def general_qa_node(state: HealioState) -> dict:
         intent=state.get("intent"),
     )
 
+    # ── Allergy conflict check (Phase 3) ─────────────────────────────────────
+    # Detects if the patient's message mentions a drug they are allergic to.
+    # Prepends a hard warning to the system prompt so the LLM cannot miss it.
+    latest_message = _get_latest_human_message(state) or ""
+    allergies: list[str] = patient_profile.get("allergies", [])
+    conflicting_allergens = _check_allergy_conflict(latest_message, allergies)
+    allergy_flagged = bool(conflicting_allergens)
+
+    if allergy_flagged:
+        log.warning(
+            "allergy_conflict_detected",
+            session_id=session_id,
+            patient_id=state.get("patient_id"),
+            conflicting=conflicting_allergens,
+        )
+
+    allergy_warning = ""
+    if allergy_flagged:
+        allergen_list = ", ".join(conflicting_allergens)
+        allergy_warning = (
+            f"\n\n⚠️ ALLERGY ALERT ⚠️\n"
+            f"This patient is allergic to: {allergen_list}.\n"
+            f"Their message mentions one of these. You MUST prominently warn "
+            f"the patient about this allergy conflict at the start of your response."
+        )
+
     # Build patient context string to inject into the system prompt
     patient_context = _build_patient_context(patient_profile)
 
     system_content = SYSTEM_PROMPT_TEMPLATE.format(
         patient_context=patient_context,
         current_date=datetime.now(UTC).strftime("%A, %B %d, %Y"),
-    )
+    ) + allergy_warning
 
     # Build message list: system prompt + full conversation history
     messages_for_llm = [
@@ -454,9 +497,19 @@ def general_qa_node(state: HealioState) -> dict:
             node_name="general_qa_node",
         ) from exc
 
-    log.info("general_qa_node_complete", session_id=session_id)
+    log.info(
+        "general_qa_node_complete",
+        session_id=session_id,
+        allergy_flagged=allergy_flagged,
+    )
 
-    return {"messages": [AIMessage(content=reply_text)]}
+    # Merge allergy_flagged into the existing flags dict
+    updated_flags = {**state.get("flags", {}), "allergy_flagged": allergy_flagged}
+
+    return {
+        "messages": [AIMessage(content=reply_text)],
+        "flags": updated_flags,
+    }
 
 
 # ── Private helper functions ───────────────────────────────────────────────────
@@ -656,3 +709,66 @@ def _mock_profile_lookup(patient_id: str) -> dict:
         }
     }
     return mock_db.get(patient_id, {})
+
+
+def _check_allergy_conflict(message: str, allergies: list[str]) -> list[str]:
+    """Return any allergens from *allergies* that are mentioned in *message*.
+
+    The check is case-insensitive and looks for the allergen name as a
+    substring, which is intentionally broad so that partial drug names (e.g.
+    "penicillin" inside "amoxicillin-/penicillin group") are not missed.
+
+    Args:
+        message:   The raw patient message text.
+        allergies: List of allergen strings from the patient profile.
+
+    Returns:
+        A (possibly empty) list of allergen strings that appear in the message.
+
+    Example:
+        >>> _check_allergy_conflict("can i take penicillin?", ["Penicillin", "NSAIDs"])
+        ['Penicillin']
+    """
+    if not message or not allergies:
+        return []
+    lower_msg = message.lower()
+    return [allergen for allergen in allergies if allergen.lower() in lower_msg]
+
+
+def _build_calendar_context() -> str:
+    """Return a short natural-language summary of available slots for today
+    and tomorrow, suitable for injection into the ``schedule_node`` system
+    prompt.
+
+    Uses :func:`app.tools.calendar.get_calendar_tool` so the LLM sees
+    *real* (mock) availability rather than a hardcoded range.  Silently
+    degrades to a generic availability line if the calendar tool raises.
+
+    Returns:
+        Multi-line string describing available appointment slots, or a
+        fallback availability note on error.
+    """
+    from datetime import timedelta  # local import to avoid circular risk
+
+    try:
+        tool = get_calendar_tool()
+        today = datetime.now(UTC).date()
+        lines: list[str] = []
+
+        for offset in range(3):  # today + next 2 days
+            target = today + timedelta(days=offset)
+            date_str = target.isoformat()  # "YYYY-MM-DD"
+            slots = tool.get_available_slots(date_str)
+            if slots:
+                times = ", ".join(s.time_str for s in slots[:6])
+                suffix = " (and more)" if len(slots) > 6 else ""
+                day_label = target.strftime("%A %d %b")
+                lines.append(f"- {day_label}: {times}{suffix}")
+
+        if lines:
+            return "Real-time available appointment slots:\n" + "\n".join(lines)
+        return "No slots currently available in the next 3 days. Ask the patient for a later date."
+
+    except Exception:
+        log.warning("calendar_context_build_failed")
+        return "Available slots: Monday–Saturday, 9 am–5:30 pm (30-minute appointments)."
