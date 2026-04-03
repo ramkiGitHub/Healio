@@ -23,6 +23,7 @@ dependencies = [
     "langchain==0.3.13",
     "langchain-openai==0.3.0",
     "langgraph==0.2.60",
+    "langgraph-checkpoint-sqlite==2.0.6",
     "langsmith==0.2.6",
 
     # ── OpenAI client ──────────────────────────────────────────
@@ -116,10 +117,6 @@ ignore_missing_imports = true
 #
 # Switch url to https://download.pytorch.org/whl/cu124 for CUDA 12.4 support.
 [tool.uv]
-# Pin the managed Python version.
-# torch==2.5.1+cpu has no Windows wheel for Python 3.13; pin to 3.12 so
-# `uv sync` always creates a cp312 venv on any platform.
-python-version = "3.12"
 required-environments = [
     "sys_platform == 'win32' and platform_machine == 'AMD64'",
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
