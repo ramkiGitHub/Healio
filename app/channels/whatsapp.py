@@ -428,7 +428,9 @@ async def _send_twilio_message(to_phone: str, text: str) -> None:
     Messages are automatically split if they exceed WhatsApp's length limit.
 
     Args:
-        to_phone: Recipient phone number (should match format received from Twilio).
+        to_phone: Recipient phone number. Can be in formats:
+                  - E.164: +1234567890
+                  - Sandbox: whatsapp:+1234567890
         text: Message text to send.
 
     Raises:
@@ -439,23 +441,35 @@ async def _send_twilio_message(to_phone: str, text: str) -> None:
     """
     chunks = _split_message(text, max_length=_MAX_MESSAGE_LENGTH)
 
+    # Normalize phone number: strip 'whatsapp:' prefix if present (API expects E.164)
+    normalized_phone = to_phone.replace("whatsapp:", "") if to_phone else to_phone
+
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
         for chunk in chunks:
             # Twilio requires basic auth
             auth = (settings.whatsapp_account_sid or "", settings.whatsapp_auth_token or "")
             url = f"{_TWILIO_API_BASE}/Accounts/{settings.whatsapp_account_sid}/Messages.json"
 
+            # Normalize phone numbers to E.164 format with whatsapp: prefix
+            from_number = settings.whatsapp_from_number or ""
+            if from_number.startswith("whatsapp:"):
+                from_number = from_number[9:]  # Strip "whatsapp:" prefix to normalize
+            
+            to_number = normalized_phone or ""
+            if to_number.startswith("whatsapp:"):
+                to_number = to_number[9:]  # Strip "whatsapp:" prefix to normalize
+
             payload = {
-                "From": settings.whatsapp_from_number,
-                "To": to_phone,
+                "From": f"whatsapp:{from_number}",
+                "To": f"whatsapp:{to_number}",
                 "Body": chunk,
             }
 
             log.debug(
                 "twilio_api_call",
                 url=url,
-                from_=settings.whatsapp_from_number,
-                to=to_phone,
+                from_=payload["From"],
+                to=payload["To"],
                 auth_user=(settings.whatsapp_account_sid or "")[:8] + "...",
             )
 
@@ -473,6 +487,8 @@ async def _send_twilio_message(to_phone: str, text: str) -> None:
                     status_code=response.status_code,
                     response_body=error_data,
                     error_msg=error_msg,
+                    from_=payload["From"],
+                    to=payload["To"],
                 )
                 raise ChannelError(
                     detail=(
@@ -482,7 +498,7 @@ async def _send_twilio_message(to_phone: str, text: str) -> None:
 
             log.info(
                 "twilio_message_sent",
-                to_phone=to_phone,
+                to_phone=payload["To"],
                 chunk_length=len(chunk),
                 response_id=response.json().get('sid', 'unknown'),
             )
