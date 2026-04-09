@@ -28,6 +28,7 @@ use ``str | None = None`` as the type + default.
 
 import logging
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -79,8 +80,10 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        # Read variables from .env file if present
-        env_file=".env",
+        # Read variables from the repo root .env file if present.
+        # This avoids a failure when uvicorn is launched from a subdirectory
+        # such as scripts/ instead of the project root.
+        env_file=Path(__file__).resolve().parents[1] / ".env",
         env_file_encoding="utf-8",
         # Ignore extra variables in .env that are not declared here
         extra="ignore",
