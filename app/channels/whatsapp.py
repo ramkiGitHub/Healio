@@ -225,8 +225,17 @@ async def _handle_twilio_payload(request: Request, body: bytes) -> JSONResponse:
         reply_text = "I'm sorry, I encountered an error processing your message. Please try again."
     # ── End graph invocation ───────────────────────────────────────────────────
 
-    # Send reply via Twilio
-    await _send_twilio_message(to_phone=sender_phone, text=reply_text)
+    # Send reply via Twilio (with error handling)
+    try:
+        await _send_twilio_message(to_phone=sender_phone, text=reply_text)
+    except Exception as exc:
+        log.error(
+            "twilio_send_error",
+            provider="twilio",
+            to_phone=sender_phone,
+            error=str(exc),
+        )
+        # Log error but still return 200 so Twilio doesn't retry indefinitely
 
     return JSONResponse(status_code=200, content={"ok": True})
 
@@ -320,8 +329,17 @@ async def _handle_meta_payload(request: Request, body: bytes) -> JSONResponse:
         reply_text = "I'm sorry, I encountered an error processing your message. Please try again."
     # ── End graph invocation ───────────────────────────────────────────────────
 
-    # Send reply via Meta
-    await _send_meta_message(to_phone=sender_phone, text=reply_text)
+    # Send reply via Meta (with error handling)
+    try:
+        await _send_meta_message(to_phone=sender_phone, text=reply_text)
+    except Exception as exc:
+        log.error(
+            "meta_send_error",
+            provider="meta",
+            to_phone=sender_phone,
+            error=str(exc),
+        )
+        # Log error but still return 200 so Meta doesn't retry indefinitely
 
     # Meta requires a 200 response, ideally within 20 seconds
     return JSONResponse(status_code=200, content={"ok": True})
@@ -433,6 +451,14 @@ async def _send_twilio_message(to_phone: str, text: str) -> None:
                 "Body": chunk,
             }
 
+            log.debug(
+                "twilio_api_call",
+                url=url,
+                from_=settings.whatsapp_from_number,
+                to=to_phone,
+                auth_user=(settings.whatsapp_account_sid or "")[:8] + "...",
+            )
+
             response = await client.post(
                 url,
                 data=payload,
@@ -441,17 +467,24 @@ async def _send_twilio_message(to_phone: str, text: str) -> None:
 
             if not response.is_success:
                 error_data = response.json() if response.content else {}
+                error_msg = error_data.get('message', error_data.get('error', {}).get('message', 'Unknown error'))
+                log.error(
+                    "twilio_api_error",
+                    status_code=response.status_code,
+                    response_body=error_data,
+                    error_msg=error_msg,
+                )
                 raise ChannelError(
                     detail=(
-                        f"Twilio API error {response.status_code}: "
-                        f"{error_data.get('message', 'Unknown error')}"
+                        f"Twilio API error {response.status_code}: {error_msg}"
                     ),
                 )
 
-            log.debug(
+            log.info(
                 "twilio_message_sent",
                 to_phone=to_phone,
                 chunk_length=len(chunk),
+                response_id=response.json().get('sid', 'unknown'),
             )
 
 
