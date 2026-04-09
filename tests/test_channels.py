@@ -154,8 +154,8 @@ class TestHealthEndpoint:
         assert "env" in data
 
 
-class TestWhatsAppPlaceholderEndpoint:
-    """Tests confirming the WhatsApp endpoint returns 501 when not configured."""
+class TestWhatsAppEndpoint:
+    """Tests confirming the WhatsApp endpoint validates signatures and requires proper configuration."""
 
     @pytest.fixture
     def client(self) -> TestClient:
@@ -163,12 +163,16 @@ class TestWhatsAppPlaceholderEndpoint:
 
         return TestClient(app)
 
-    def test_whatsapp_webhook_returns_501(self, client: TestClient) -> None:
-        """POST /webhook/whatsapp returns 501 when WHATSAPP_PROVIDER is not set."""
+    def test_whatsapp_webhook_requires_signature_validation(self, client: TestClient) -> None:
+        """POST /webhook/whatsapp returns 400 when Twilio signature is invalid (provider is Twilio)."""
+        # Now that WhatsApp is enabled with Twilio, the endpoint validates signatures
+        # An unauthenticated POST will fail signature validation -> 400
         response = client.post("/webhook/whatsapp", json={"test": "data"})
-        assert response.status_code == 501
+        assert response.status_code == 400
 
-    def test_whatsapp_verify_returns_501(self, client: TestClient) -> None:
-        """GET /webhook/whatsapp returns 501 when WHATSAPP_PROVIDER is not set."""
+    def test_whatsapp_verify_returns_404_for_twilio_provider(self, client: TestClient) -> None:
+        """GET /webhook/whatsapp returns 404 when WHATSAPP_PROVIDER=twilio (only Meta uses GET verify)."""
+        # GET verification is only for Meta Cloud API; Twilio does not use it
+        # Since .env has WHATSAPP_PROVIDER=twilio, GET returns 404
         response = client.get("/webhook/whatsapp")
-        assert response.status_code == 501
+        assert response.status_code == 404

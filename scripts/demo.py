@@ -128,7 +128,7 @@ def _make_message(
     return IncomingMessage(
         session_id=session_id,
         patient_id=patient_id,
-        channel=ChannelType.TELEGRAM,
+        channel=ChannelType.WHATSAPP,
         text=text,
         sender_name="Demo Patient",
     )
@@ -174,9 +174,13 @@ async def _run_flow(
 
 # ── Individual flows ──────────────────────────────────────────────────────────
 
-EMERGENCY_SESSION = "telegram:demo_emergency_001"
-APPOINTMENT_SESSION = "telegram:demo_appt_001"
-ALLERGY_SESSION = "telegram:demo_allergy_001"
+# EMERGENCY_SESSION = "telegram:demo_emergency_001"
+# APPOINTMENT_SESSION = "telegram:demo_appt_001"
+# ALLERGY_SESSION = "telegram:demo_allergy_001"
+
+EMERGENCY_SESSION="WhATSAPP:demo_emergency_001"
+APPOINTMENT_SESSION="WHATSAPP:demo_appt_001"
+ALLERGY_SESSION="WHATSAPP:demo_allergy_001"
 
 
 async def flow_emergency() -> bool:

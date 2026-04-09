@@ -1,60 +1,71 @@
 """
 app/channels/whatsapp.py
 ========================
-WhatsApp webhook handler — PLACEHOLDER (not active in MVP).
+WhatsApp webhook handler (Twilio + Meta Cloud API).
 
-Why this file exists
---------------------
-The WhatsApp endpoint is scaffolded now so:
-1. The route exists and returns a clear ``501 Not Implemented`` response
-   rather than a confusing ``404 Not Found``.
-2. The code structure and pattern are ready — activating WhatsApp only
-   requires filling in the handler logic and setting env vars; no structural
-   changes to main.py or the graph are needed.
-3. Developers know exactly what to implement and configure.
+Supported providers
+-------------------
+1. **Twilio** — WhatsApp Business API integration.
+2. **Meta Cloud API** — Official WhatsApp Business Platform.
 
-How to activate WhatsApp
-------------------------
-1. Choose a provider and fill in the required .env variables:
+How to set up
+-------------
 
-   --- Option A: Twilio ---
+--- Twilio Setup ---
+1. Sign up for Twilio: https://www.twilio.com/whatsapp
+2. Set in .env:
    WHATSAPP_PROVIDER=twilio
    WHATSAPP_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
    WHATSAPP_AUTH_TOKEN=your_auth_token
    WHATSAPP_FROM_NUMBER=whatsapp:+14155238886
 
-   --- Option B: Meta Cloud API ---
+3. Register webhook URL in Twilio Console:
+   https://console.twilio.com → Messaging → Sandbox Configuration
+
+--- Meta Cloud API Setup ---
+1. Apply at: https://developers.facebook.com/whatsapp
+2. Set in .env:
    WHATSAPP_PROVIDER=meta
    WHATSAPP_ACCESS_TOKEN=your_access_token
    WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
    WHATSAPP_VERIFY_TOKEN=your_verify_token
 
-2. Implement ``_handle_twilio_payload()`` or ``_handle_meta_payload()``
-   in this file (marked with TODO comments below).
+3. Register webhook URL in Meta App Dashboard:
+   App Dashboard → Whatsapp Business Platform → Configuration
 
-3. Remove the 501 guard at the top of the ``whatsapp_webhook`` handler.
-
-4. Deploy and register your public URL with Twilio or Meta:
-   Twilio:  https://console.twilio.com → Messaging → WhatsApp Sandbox
-   Meta:    https://developers.facebook.com → WhatsApp → Configuration
+Provider-agnostic flow
+----------------------
+1. Webhook receives a message from Twilio or Meta.
+2. Signature is validated.
+3. Payload is parsed into an IncomingMessage DTO.
+4. LangGraph pipeline processes the message.
+5. Reply is sent back via the same provider's API.
 """
 
 import hashlib
 import hmac
+from urllib.parse import parse_qs
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from tenacity import retry, stop_after_attempt, wait_exponential
 
-from app.channels.normalizer import normalize_whatsapp
+from app.channels.normalizer import IncomingMessage, format_for_channel, normalize_whatsapp
 from app.config import settings
+from app.constants import ChannelType, WhatsAppProvider
+from app.exceptions import ChannelError
 from app.logging_config import get_logger
 
 log = get_logger(__name__)
 
 router = APIRouter()
 
+# ── Constants ──────────────────────────────────────────────────────────────────
+_MAX_MESSAGE_LENGTH = 4096  # WhatsApp message length limit
+_TWILIO_API_BASE = "https://api.twilio.com/2010-04-01"
+_META_API_BASE = "https://graph.facebook.com/v17.0"
 
-# ── Webhook verification (Meta Cloud API) ─────────────────────────────────────
 
 @router.get("/whatsapp", tags=["Channels"])
 async def whatsapp_verify(request: Request) -> PlainTextResponse:
@@ -64,8 +75,7 @@ async def whatsapp_verify(request: Request) -> PlainTextResponse:
     first register the webhook URL. This endpoint responds with the challenge
     value to prove ownership of the URL.
 
-    This endpoint is also a PLACEHOLDER — it returns 501 until
-    ``WHATSAPP_PROVIDER=meta`` and ``WHATSAPP_VERIFY_TOKEN`` are configured.
+    If WhatsApp is not configured or a non-Meta provider is active, returns 404.
 
     Args:
         request: The incoming FastAPI request.
@@ -73,14 +83,14 @@ async def whatsapp_verify(request: Request) -> PlainTextResponse:
     Returns:
         The ``hub.challenge`` value as a plain text response (HTTP 200), or
         HTTP 403 if the verify token does not match, or
-        HTTP 501 if WhatsApp is not configured.
+        HTTP 404 if WhatsApp is not configured or provider is not Meta.
 
     Docs:
         https://developers.facebook.com/docs/graph-api/webhooks/getting-started
     """
-    if not settings.whatsapp_provider:
-        log.warning("whatsapp_verify_called_but_not_configured")
-        return PlainTextResponse("WhatsApp not configured", status_code=501)
+    # Only Meta uses GET verification; Twilio doesn't
+    if settings.whatsapp_provider != WhatsAppProvider.META:
+        raise HTTPException(status_code=404, detail="Not Found")
 
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
@@ -100,50 +110,34 @@ async def whatsapp_verify(request: Request) -> PlainTextResponse:
 async def whatsapp_webhook(request: Request) -> JSONResponse:
     """Receive inbound WhatsApp messages and route them through Healio.
 
-    STATUS: PLACEHOLDER — Returns HTTP 501 until WhatsApp is configured.
-
-    When activated, this handler will:
-    1. Validate the request signature (Twilio HMAC or Meta signature).
-    2. Parse the provider-specific payload.
-    3. Normalise the message into an ``IncomingMessage`` DTO.
-    4. Invoke the LangGraph pipeline.
-    5. Send the reply back to the patient via the WhatsApp provider.
+    When WhatsApp is configured, this handler:
+    1. Validates the request signature (Twilio HMAC or Meta signature).
+    2. Parses the provider-specific payload.
+    3. Normalises the message into an ``IncomingMessage`` DTO.
+    4. Invokes the LangGraph pipeline.
+    5. Sends the reply back to the patient via the WhatsApp provider.
 
     Args:
         request: The incoming FastAPI request containing the webhook payload.
 
     Returns:
         HTTP 200 acknowledgment JSON (providers expect fast 200 responses).
-        HTTP 501 if WhatsApp is not yet configured.
+        HTTP 404 if WhatsApp is not configured.
         HTTP 400 on signature validation failure.
 
     Raises:
-        HTTPException: On signature validation failure.
+        HTTPException: On signature validation failure or configuration error.
     """
-    # ── PLACEHOLDER GUARD ─────────────────────────────────────────────────────
-    # Remove this block when WHATSAPP_PROVIDER is configured in .env
     if not settings.whatsapp_provider:
         log.warning(
             "whatsapp_webhook_called_but_not_configured",
             hint="Set WHATSAPP_PROVIDER in .env to activate WhatsApp integration",
         )
-        return JSONResponse(
-            status_code=501,
-            content={
-                "error": "not_implemented",
-                "detail": (
-                    "WhatsApp integration is not configured. "
-                    "See .env.example for setup instructions."
-                ),
-            },
-        )
-    # ── END PLACEHOLDER GUARD ─────────────────────────────────────────────────
+        raise HTTPException(status_code=404, detail="Not Found")
 
     body = await request.body()
 
     # Route to the correct provider handler
-    from app.constants import WhatsAppProvider  # local import to avoid circular
-
     if settings.whatsapp_provider == WhatsAppProvider.TWILIO:
         return await _handle_twilio_payload(request=request, body=body)
 
@@ -161,56 +155,176 @@ async def whatsapp_webhook(request: Request) -> JSONResponse:
 async def _handle_twilio_payload(request: Request, body: bytes) -> JSONResponse:
     """Parse and handle a Twilio WhatsApp webhook payload.
 
-    TODO: Implement when Twilio is configured.
-    Steps to implement:
-    1. Validate Twilio HMAC-SHA1 signature using X-Twilio-Signature header.
-       Docs: https://www.twilio.com/docs/usage/webhooks/webhooks-security
-    2. Parse form-encoded body: ``From``, ``Body``, ``ProfileName`` fields.
-    3. Normalise: ``normalize_whatsapp(sender_phone=from_, text=body_text)``.
-    4. Run LangGraph pipeline (same as Telegram handler).
-    5. Send reply via Twilio REST API:
-       POST https://api.twilio.com/2010-04-01/Accounts/{SID}/Messages.json
+    Twilio sends form-encoded messages with From, Body, ProfileName, etc.
+    This handler:
+    1. Validates the Twilio HMAC-SHA1 signature using X-Twilio-Signature.
+    2. Parses the form data.
+    3. Normalises into IncomingMessage.
+    4. Runs the LangGraph pipeline.
+    5. Sends the reply via Twilio REST API.
 
     Args:
-        request: The FastAPI request with Twilio headers.
+        request: The FastAPI request with Twilio headers and form body.
         body: Raw request body bytes.
 
     Returns:
-        HTTP 200 JSON acknowledgment.
+        HTTP 200 JSON acknowledgment, or HTTP 400 on validation failure.
+
+    Docs:
+        https://www.twilio.com/docs/usage/webhooks/webhooks-security
+        https://www.twilio.com/docs/sms/whatsapp/api
     """
-    log.warning("twilio_handler_not_implemented")
-    return JSONResponse(
-        status_code=501,
-        content={"detail": "Twilio handler not yet implemented. See TODO in whatsapp.py."},
+    # Validate Twilio signature
+    signature_header = request.headers.get("X-Twilio-Signature", "")
+    if not _validate_twilio_signature(
+        uri=str(request.url),
+        body=body,
+        signature_header=signature_header,
+    ):
+        log.warning("twilio_signature_validation_failed")
+        raise HTTPException(status_code=400, detail="Signature validation failed")
+
+    # Parse form-encoded body
+    try:
+        body_str = body.decode("utf-8")
+        form_data = parse_qs(body_str)
+        # parse_qs returns lists; extract single values
+        sender_phone: str = (form_data.get("From") or [""])[0]
+        message_text: str = (form_data.get("Body") or [""])[0]
+        sender_name: str | None = (form_data.get("ProfileName") or [None])[0]
+    except (ValueError, KeyError, IndexError) as exc:
+        log.warning("twilio_payload_parse_error", error=str(exc))
+        raise HTTPException(status_code=400, detail="Invalid payload format") from exc
+
+    if not sender_phone or not message_text:
+        log.warning("twilio_missing_required_fields", from_=sender_phone)
+        return JSONResponse(status_code=200, content={"ok": True})
+
+    # Normalise message
+    incoming: IncomingMessage = normalize_whatsapp(
+        sender_phone=sender_phone,
+        text=message_text.strip(),
+        sender_name=sender_name,
+        raw_payload=dict(form_data),
     )
+
+    log.info(
+        "whatsapp_message_received",
+        provider="twilio",
+        session_id=incoming.session_id,
+        text_length=len(incoming.text),
+    )
+
+    # ── Invoke LangGraph pipeline ──────────────────────────────────────────────
+    try:
+        from app.graph.graph import run_graph
+        reply_text = await run_graph(incoming)
+    except Exception as exc:
+        log.error("whatsapp_graph_error", provider="twilio", error=str(exc))
+        # Send a safe fallback message to the patient
+        reply_text = "I'm sorry, I encountered an error processing your message. Please try again."
+    # ── End graph invocation ───────────────────────────────────────────────────
+
+    # Send reply via Twilio
+    await _send_twilio_message(to_phone=sender_phone, text=reply_text)
+
+    return JSONResponse(status_code=200, content={"ok": True})
 
 
 async def _handle_meta_payload(request: Request, body: bytes) -> JSONResponse:
     """Parse and handle a Meta Cloud API WhatsApp webhook payload.
 
-    TODO: Implement when Meta Cloud API is configured.
-    Steps to implement:
-    1. Validate Meta signature using X-Hub-Signature-256 header.
-       Docs: https://developers.facebook.com/docs/graph-api/webhooks/getting-started#verification-requests
-    2. Parse JSON body: entry[0].changes[0].value.messages[0]
-    3. Extract: ``from`` (phone), ``text.body`` (message text).
-    4. Normalise: ``normalize_whatsapp(sender_phone=from_, text=text_body)``.
-    5. Run LangGraph pipeline (same as Telegram handler).
-    6. Send reply via Meta Graph API:
-       POST https://graph.facebook.com/v17.0/{PHONE_NUMBER_ID}/messages
+    Meta sends JSON messages with nested structure: entry[0].changes[0].value.messages[0]
+    This handler:
+    1. Validates Meta signature using X-Hub-Signature-256 header.
+    2. Parses the JSON payload.
+    3. Normalises into IncomingMessage.
+    4. Runs the LangGraph pipeline.
+    5. Sends the reply via Meta Graph API.
 
     Args:
-        request: The FastAPI request with Meta headers.
+        request: The FastAPI request with Meta headers and JSON body.
         body: Raw request body bytes.
 
     Returns:
-        HTTP 200 JSON acknowledgment (Meta requires 200 within 20 seconds).
+        HTTP 200 JSON acknowledgment (Meta requires 200 within 20 seconds),
+        or HTTP 400 on validation failure.
+
+    Docs:
+        https://developers.facebook.com/docs/graph-api/webhooks/getting-started#verification-requests
+        https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages
     """
-    log.warning("meta_handler_not_implemented")
-    return JSONResponse(
-        status_code=501,
-        content={"detail": "Meta Cloud API handler not yet implemented. See TODO in whatsapp.py."},
+    # Validate Meta signature
+    signature_header = request.headers.get("X-Hub-Signature-256")
+    if not _validate_meta_signature(body=body, signature_header=signature_header):
+        log.warning("meta_signature_validation_failed")
+        raise HTTPException(status_code=400, detail="Signature validation failed")
+
+    # Parse JSON body
+    try:
+        import json
+        payload = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        log.warning("meta_payload_parse_error", error=str(exc))
+        raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+    # Extract message from nested structure
+    try:
+        entry = payload.get("entry", [{}])[0]
+        change = entry.get("changes", [{}])[0]
+        value = change.get("value", {})
+        messages = value.get("messages", [])
+
+        if not messages:
+            # No messages in this event (could be a status update, for example)
+            log.debug("meta_event_without_messages")
+            return JSONResponse(status_code=200, content={"ok": True})
+
+        message = messages[0]
+        sender_phone: str = value.get("contacts", [{}])[0].get("wa_id", "")
+        sender_name: str | None = value.get("contacts", [{}])[0].get("profile", {}).get("name")
+
+        # Extract text from message
+        message_text: str = message.get("text", {}).get("body", "")
+
+        if not sender_phone or not message_text:
+            log.warning("meta_missing_required_fields", from_=sender_phone)
+            return JSONResponse(status_code=200, content={"ok": True})
+
+    except (KeyError, IndexError, TypeError) as exc:
+        log.warning("meta_payload_extraction_error", error=str(exc))
+        raise HTTPException(status_code=400, detail="Invalid payload structure") from exc
+
+    # Normalise message
+    incoming: IncomingMessage = normalize_whatsapp(
+        sender_phone=sender_phone,
+        text=message_text.strip(),
+        sender_name=sender_name,
+        raw_payload=payload,
     )
+
+    log.info(
+        "whatsapp_message_received",
+        provider="meta",
+        session_id=incoming.session_id,
+        text_length=len(incoming.text),
+    )
+
+    # ── Invoke LangGraph pipeline ──────────────────────────────────────────────
+    try:
+        from app.graph.graph import run_graph
+        reply_text = await run_graph(incoming)
+    except Exception as exc:
+        log.error("whatsapp_graph_error", provider="meta", error=str(exc))
+        # Send a safe fallback message to the patient
+        reply_text = "I'm sorry, I encountered an error processing your message. Please try again."
+    # ── End graph invocation ───────────────────────────────────────────────────
+
+    # Send reply via Meta
+    await _send_meta_message(to_phone=sender_phone, text=reply_text)
+
+    # Meta requires a 200 response, ideally within 20 seconds
+    return JSONResponse(status_code=200, content={"ok": True})
 
 
 def _validate_meta_signature(body: bytes, signature_header: str | None) -> bool:
@@ -243,3 +357,198 @@ def _validate_meta_signature(body: bytes, signature_header: str | None) -> bool:
 
     # Use constant-time comparison to prevent timing attacks
     return hmac.compare_digest(computed_hash, provided_hash)
+
+def _validate_twilio_signature(uri: str, body: bytes, signature_header: str | None) -> bool:
+    """Validate the X-Twilio-Signature header from Twilio webhook requests.
+
+    Twilio signs each webhook request with HMAC-SHA1 using the auth token
+    as the shared secret. This helper verifies the signature to prevent spoofed requests.
+
+    Args:
+        uri: The full request URI (including https:// and query parameters).
+        body: Raw request body bytes.
+        signature_header: Value of the ``X-Twilio-Signature`` header, e.g. ``abc123...``.
+
+    Returns:
+        True if the signature is valid, False otherwise.
+
+    Docs:
+        https://www.twilio.com/docs/usage/webhooks/webhooks-security
+
+    Example:
+        >>> valid = _validate_twilio_signature(
+        ...     uri="https://example.com/webhook/whatsapp",
+        ...     body=b"From=...",
+        ...     signature_header="abc123...",
+        ... )
+    """
+    if not signature_header or not settings.whatsapp_auth_token:
+        return False
+
+    # Twilio signs the full URI + body
+    data = uri + body.decode("utf-8") if isinstance(body, bytes) else uri + body
+    secret = (settings.whatsapp_auth_token or "").encode()
+
+    # Twilio uses SHA1, not SHA256
+    import hashlib
+    computed_hash = hmac.new(secret, data.encode("utf-8"), hashlib.sha1).digest()
+    import base64
+    computed_signature = base64.b64encode(computed_hash).decode("utf-8")
+
+    return hmac.compare_digest(computed_signature, signature_header)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    reraise=True,
+)
+async def _send_twilio_message(to_phone: str, text: str) -> None:
+    """Send a WhatsApp message via Twilio.
+
+    Twilio requires basic auth with Account SID and Auth Token.
+    Messages are automatically split if they exceed WhatsApp's length limit.
+
+    Args:
+        to_phone: Recipient phone number (should match format received from Twilio).
+        text: Message text to send.
+
+    Raises:
+        ChannelError: If the Twilio API returns a non-2xx status after retries.
+
+    Example:
+        >>> await _send_twilio_message(to_phone="whatsapp:+919876543210", text="Hello!")
+    """
+    chunks = _split_message(text, max_length=_MAX_MESSAGE_LENGTH)
+
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        for chunk in chunks:
+            # Twilio requires basic auth
+            auth = (settings.whatsapp_account_sid or "", settings.whatsapp_auth_token or "")
+            url = f"{_TWILIO_API_BASE}/Accounts/{settings.whatsapp_account_sid}/Messages.json"
+
+            payload = {
+                "From": settings.whatsapp_from_number,
+                "To": to_phone,
+                "Body": chunk,
+            }
+
+            response = await client.post(
+                url,
+                data=payload,
+                auth=auth,
+            )
+
+            if not response.is_success:
+                error_data = response.json() if response.content else {}
+                raise ChannelError(
+                    detail=(
+                        f"Twilio API error {response.status_code}: "
+                        f"{error_data.get('message', 'Unknown error')}"
+                    ),
+                )
+
+            log.debug(
+                "twilio_message_sent",
+                to_phone=to_phone,
+                chunk_length=len(chunk),
+            )
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    reraise=True,
+)
+async def _send_meta_message(to_phone: str, text: str) -> None:
+    """Send a WhatsApp message via Meta Cloud API.
+
+    Meta requires the phone number ID and access token in the URL and headers.
+    Messages are automatically split if they exceed WhatsApp's length limit.
+
+    Args:
+        to_phone: Recipient phone number in E.164 format (e.g., +919876543210).
+        text: Message text to send.
+
+    Raises:
+        ChannelError: If the Meta API returns a non-2xx status after retries.
+
+    Example:
+        >>> await _send_meta_message(to_phone="+919876543210", text="Hello!")
+    """
+    chunks = _split_message(text, max_length=_MAX_MESSAGE_LENGTH)
+
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        for chunk in chunks:
+            url = f"{_META_API_BASE}/{settings.whatsapp_phone_number_id}/messages"
+
+            payload = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to_phone,
+                "type": "text",
+                "text": {
+                    "body": chunk,
+                },
+            }
+
+            headers = {
+                "Authorization": f"Bearer {settings.whatsapp_access_token}",
+            }
+
+            response = await client.post(
+                url,
+                json=payload,
+                headers=headers,
+            )
+
+            if not response.is_success:
+                error_data = response.json() if response.content else {}
+                errors = error_data.get("error", {}).get("message", "Unknown error")
+                raise ChannelError(
+                    detail=(
+                        f"Meta API error {response.status_code}: {errors}"
+                    ),
+                )
+
+            log.debug(
+                "meta_message_sent",
+                to_phone=to_phone,
+                chunk_length=len(chunk),
+            )
+
+
+def _split_message(text: str, max_length: int = _MAX_MESSAGE_LENGTH) -> list[str]:
+    """Split a long message into chunks that fit within the channel's limit.
+
+    Tries to split on word boundaries to avoid breaking words.
+
+    Args:
+        text: The message text to split.
+        max_length: Maximum length per chunk.
+
+    Returns:
+        A list of message chunks, each <= max_length characters.
+
+    Example:
+        >>> _split_message("Hello world!", max_length=5)
+        ['Hello', 'world!']
+    """
+    if len(text) <= max_length:
+        return [text]
+
+    chunks = []
+    current_chunk = ""
+
+    for line in text.split("\n"):
+        if len(current_chunk) + len(line) + 1 <= max_length:
+            current_chunk += (newline := "\n" if current_chunk else "") + line
+        else:
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = line
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks

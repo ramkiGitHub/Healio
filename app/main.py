@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         openai_model=settings.openai_model,
         calendar_provider=settings.effective_calendar_provider,
         telegram_polling=settings.telegram_polling_mode,
-        whatsapp_active=settings.whatsapp_provider is not None,
+        whatsapp_provider=settings.whatsapp_provider,
         biobert_disabled=settings.disable_biobert,
     )
 
@@ -118,7 +118,7 @@ app = FastAPI(
     description=(
         "AI-powered medical assistant for Indian clinics. "
         "Handles patient queries, appointment scheduling, and emergency triage "
-        "via Telegram and WhatsApp (placeholder)."
+        "via Telegram and WhatsApp."
     ),
     version="0.1.0",
     lifespan=lifespan,
