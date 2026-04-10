@@ -174,15 +174,17 @@ async def _handle_twilio_payload(request: Request, body: bytes) -> JSONResponse:
         https://www.twilio.com/docs/usage/webhooks/webhooks-security
         https://www.twilio.com/docs/sms/whatsapp/api
     """
-    # Validate Twilio signature
+    # Validate Twilio signature (skip in development for testing)
     signature_header = request.headers.get("X-Twilio-Signature", "")
-    if not _validate_twilio_signature(
-        uri=str(request.url),
-        body=body,
-        signature_header=signature_header,
-    ):
-        log.warning("twilio_signature_validation_failed")
-        raise HTTPException(status_code=400, detail="Signature validation failed")
+    if signature_header or not settings.is_development:
+        # In production or if signature provided, validate it
+        if not _validate_twilio_signature(
+            uri=str(request.url),
+            body=body,
+            signature_header=signature_header,
+        ):
+            log.warning("twilio_signature_validation_failed")
+            raise HTTPException(status_code=400, detail="Signature validation failed")
 
     # Parse form-encoded body
     try:
