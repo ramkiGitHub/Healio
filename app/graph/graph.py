@@ -197,7 +197,7 @@ def _get_compiled_graph() -> CompiledStateGraph:
 
 # ── Public entry point ─────────────────────────────────────────────────────────
 
-async def run_graph(incoming) -> str:  # type: ignore[no-untyped-def]
+async def  run_graph(incoming) -> str:  # type: ignore[no-untyped-def]
     """Process a patient message through the Healio LangGraph pipeline.
 
     This is the single public function that all channel handlers (Telegram,

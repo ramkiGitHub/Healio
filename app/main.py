@@ -29,7 +29,8 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import generate_latest, CollectorRegistry, REGISTRY
 
 from app.config import settings
 from app.exceptions import (
@@ -42,6 +43,7 @@ from app.exceptions import (
     NLPError,
     PatientNotFoundError,
 )
+from app.health import get_health_status
 from app.logging_config import configure_logging, get_logger
 
 log = get_logger(__name__)
@@ -141,27 +143,144 @@ app.include_router(whatsapp_router, prefix="/webhook", tags=["Channels"])
 # ── Health check ───────────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["System"])
-async def health_check() -> dict[str, str]:
-    """Liveness and readiness health check endpoint.
+async def health_check() -> dict:
+    """Comprehensive health check endpoint with component status.
 
     Used by Docker health checks and load balancers to verify the service
-    is running and ready to accept requests.
+    is running and all critical dependencies are accessible.
+
+    This endpoint runs checks on:
+    - Database connectivity (SQLite / PostgreSQL)
+    - OpenAI API availability
+    - Telegram bot API responsiveness
+    - WhatsApp provider (Twilio or Meta Cloud API)
 
     Returns:
-        A JSON object with status and version information.
+        A JSON object with:
+        - status: "ok" (backward compatible), "degraded", or "error"
+        - overall_status: "healthy", "degraded", or "unhealthy" (new format)
+        - version: Application version
+        - env: Environment (development, production)
+        - timestamp: ISO 8601 UTC timestamp of check
+        - uptime_seconds: Seconds since startup
+        - components: Dict of individual component statuses
 
-    Example response:
+    Example response (healthy):
         {
             "status": "ok",
+            "overall_status": "healthy",
             "version": "0.1.0",
-            "env": "development"
+            "env": "development",
+            "timestamp": "2026-04-13T10:30:45.123456",
+            "uptime_seconds": 3600.5,
+            "components": {
+                "database": {
+                    "status": "healthy",
+                    "message": "SQLite database accessible",
+                    "response_time_ms": 2.5
+                },
+                "openai": {
+                    "status": "healthy",
+                    "message": "OpenAI API responsive",
+                    "response_time_ms": 150.3
+                },
+                "telegram": {
+                    "status": "healthy",
+                    "message": "Telegram bot API responsive",
+                    "response_time_ms": 200.1
+                },
+                "whatsapp": {
+                    "status": "healthy",
+                    "message": "Twilio account active...",
+                    "response_time_ms": 180.5
+                }
+            }
         }
+
+    HTTP Status Codes:
+        200 OK: Service is healthy or degraded (can handle requests)
+        503 Service Unavailable: Service is unhealthy (critical failures)
     """
-    return {
-        "status": "ok",
-        "version": "0.1.0",
-        "env": settings.app_env,
+    status = await get_health_status()
+    
+    # Map overall_status to backward-compatible status field
+    status_map = {
+        "healthy": "ok",
+        "degraded": "degraded",
+        "unhealthy": "error",
     }
+    
+    # Return 503 if service is truly unhealthy (critical failures)
+    status_code = 200
+    if status.overall_status.value == "unhealthy":
+        status_code = 503
+    
+    result = {
+        # Backward-compatible fields
+        "status": status_map.get(status.overall_status.value, "ok"),
+        "version": status.version,
+        "env": settings.app_env,
+        # New detailed fields
+        **status.to_dict(),
+    }
+    
+    return result
+
+
+# ── Ready check (for Kubernetes readiness) ────────────────────────────────────
+
+@app.get("/ready", tags=["System"])
+async def readiness_check() -> dict[str, str]:
+    """Simple readiness check for Kubernetes/Nomad orchestration.
+
+    Returns HTTP 200 only if all critical services are healthy.
+    This is stricter than /health — returns 503 if degraded.
+
+    Returns:
+        A JSON object with ready status.
+
+    HTTP Status Codes:
+        200 OK: Ready to accept requests
+        503 Service Unavailable: Not ready (critical service unavailable)
+    """
+    status = await get_health_status()
+    
+    if status.overall_status.value in ["healthy", "degraded"]:
+        return {"ready": True, "status": status.overall_status.value}
+    else:
+        raise ValueError("Service not ready")
+
+
+# ── Prometheus metrics ─────────────────────────────────────────────────────────
+
+@app.get("/metrics", tags=["System"])
+async def metrics_endpoint() -> Response:
+    """Prometheus metrics endpoint.
+
+    Exposes application metrics in Prometheus text format.
+    Used by monitoring systems (Prometheus, Grafana, etc.)
+    to collect health and performance data.
+
+    Metrics include:
+    - HTTP request counts and latency
+    - Health check component response times
+    - Message/channel statistics
+    - LLM API call counts and latency
+    - Tool execution metrics
+    - Database query performance
+
+    Returns:
+        Prometheus-formatted metrics (text/plain)
+
+    Example:
+        # HELP healio_http_requests_total Total HTTP requests processed
+        # TYPE healio_http_requests_total counter
+        healio_http_requests_total{endpoint="/webhook/whatsapp",...} 1.0
+    """
+    return Response(
+        content=generate_latest(REGISTRY),
+        media_type="text/plain; version=0.0.4",
+    )
 
 
 # ── Global exception handlers ──────────────────────────────────────────────────

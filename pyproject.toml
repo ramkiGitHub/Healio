@@ -45,6 +45,9 @@ dependencies = [
     # ── Structured logging ─────────────────────────────────────
     "structlog==24.4.0",
 
+    # ── Monitoring & metrics ───────────────────────────────────
+    "prometheus-client==0.21.0",
+
     # ── Database (SQLite + future PostgreSQL) ──────────────────
     "aiosqlite==0.20.0",
 
